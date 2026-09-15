@@ -19,7 +19,7 @@ BASE_SEED = 42
 
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------------------------------------
 
 def sigmoid(x):
@@ -27,14 +27,11 @@ def sigmoid(x):
 
 
 def gini(values):
-    """
-    Calculate the Gini coefficient.
 
-    0 = perfectly equal popularity
-    1 = extremely unequal popularity
-    """
-
-    values = np.asarray(values, dtype=float)
+    values = np.asarray(
+        values,
+        dtype=float,
+    )
 
     if np.all(values == 0):
         return 0.0
@@ -47,46 +44,88 @@ def gini(values):
 
     return (
         (n + 1)
-        - 2 * np.sum(cumulative) / cumulative[-1]
+        - 2 * np.sum(cumulative)
+        / cumulative[-1]
     ) / n
 
 
 # ---------------------------------------------------------
-# CREATE FIXED WORLD
+# FIXED UNDERLYING WORLD
 # ---------------------------------------------------------
 
 def create_true_preferences():
     """
-    Create the underlying user-item preferences.
+    Create persistent user preferences and item quality.
 
-    These remain IDENTICAL in every simulated world.
+    These are identical in every parallel world.
+
+    Each user's probability of clicking an item depends on:
+
+        global item quality
+            +
+        personal user-item affinity
+
+    Therefore genuinely strong items exist, while users
+    can still have different tastes.
     """
 
-    rng = np.random.default_rng(BASE_SEED)
+    rng = np.random.default_rng(
+        BASE_SEED
+    )
 
+    # Personal taste
     user_factors = rng.normal(
         0,
-        1,
-        size=(NUM_USERS, LATENT_DIM),
+        0.7,
+        size=(
+            NUM_USERS,
+            LATENT_DIM,
+        ),
     )
 
     item_factors = rng.normal(
         0,
-        1,
-        size=(NUM_ITEMS, LATENT_DIM),
+        0.7,
+        size=(
+            NUM_ITEMS,
+            LATENT_DIM,
+        ),
     )
 
-    raw_scores = (
+    # Persistent intrinsic quality of each item.
+    item_quality = rng.normal(
+        0,
+        0.8,
+        size=NUM_ITEMS,
+    )
+
+    personal_affinity = (
         user_factors
         @ item_factors.T
         / np.sqrt(LATENT_DIM)
+    )
+
+    raw_scores = (
+        personal_affinity
+        + item_quality[None, :]
     )
 
     click_probabilities = sigmoid(
         raw_scores
     )
 
-    return click_probabilities
+    # Operational "true quality":
+    # probability of being clicked by an average user.
+    true_item_quality = (
+        click_probabilities.mean(
+            axis=0
+        )
+    )
+
+    return (
+        click_probabilities,
+        true_item_quality,
+    )
 
 
 # ---------------------------------------------------------
@@ -104,6 +143,7 @@ def random_recommender(
     )[0]
 
     if len(available) == 0:
+
         available = np.arange(
             NUM_ITEMS
         )
@@ -125,20 +165,21 @@ def popularity_recommender(
     )[0]
 
     if len(available) == 0:
+
         available = np.arange(
             NUM_ITEMS
         )
 
     available_clicks = (
-        click_counts[available]
+        click_counts[
+            available
+        ]
     )
 
     max_clicks = (
         available_clicks.max()
     )
 
-    # There may be several equally popular items.
-    # Random tie-breaking is one source of stochasticity.
     candidates = available[
         available_clicks
         == max_clicks
@@ -191,9 +232,9 @@ def simulate_world(
             NUM_USERS
         )
 
-        # -------------------------------------------------
-        # EARLY RANDOM EXPOSURE
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # INITIAL RANDOM EXPOSURE
+        # ---------------------------------------------
 
         if (
             step
@@ -208,7 +249,10 @@ def simulate_world(
 
         else:
 
-            if recommender_name == "random":
+            if (
+                recommender_name
+                == "random"
+            ):
 
                 item = random_recommender(
                     rng,
@@ -216,7 +260,10 @@ def simulate_world(
                     seen,
                 )
 
-            elif recommender_name == "popularity":
+            elif (
+                recommender_name
+                == "popularity"
+            ):
 
                 item = popularity_recommender(
                     rng,
@@ -232,17 +279,22 @@ def simulate_world(
                     f"{recommender_name}"
                 )
 
-        # Record exposure.
-        exposure_counts[item] += 1
+        # ---------------------------------------------
+        # EXPOSURE
+        # ---------------------------------------------
+
+        exposure_counts[
+            item
+        ] += 1
 
         seen[
             user,
             item
         ] = True
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # USER RESPONSE
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         probability = (
             true_preferences[
@@ -258,7 +310,10 @@ def simulate_world(
 
         if clicked:
 
-            click_counts[item] += 1
+            click_counts[
+                item
+            ] += 1
+
             total_clicks += 1
 
     return {
@@ -271,8 +326,15 @@ def simulate_world(
         "total_clicks":
             total_clicks,
 
-        "gini":
-            gini(click_counts),
+        "popularity_gini":
+            gini(
+                click_counts
+            ),
+
+        "exposure_gini":
+            gini(
+                exposure_counts
+            ),
     }
 
 
@@ -282,10 +344,24 @@ def simulate_world(
 
 def compare_worlds(
     results,
+    true_item_quality,
 ):
 
     correlations = []
     top_10_overlaps = []
+
+    quality_correlations = []
+    true_top_10_recall = []
+
+    true_top_10 = set(
+        np.argsort(
+            true_item_quality
+        )[-10:]
+    )
+
+    # ---------------------------------------------
+    # WORLD-TO-WORLD COMPARISON
+    # ---------------------------------------------
 
     for i in range(
         len(results)
@@ -316,6 +392,7 @@ def compare_worlds(
             if not np.isnan(
                 correlation
             ):
+
                 correlations.append(
                     correlation
                 )
@@ -334,8 +411,7 @@ def compare_worlds(
 
             overlap = (
                 len(
-                    top_a
-                    & top_b
+                    top_a & top_b
                 )
                 / 10
             )
@@ -343,6 +419,47 @@ def compare_worlds(
             top_10_overlaps.append(
                 overlap
             )
+
+    # ---------------------------------------------
+    # TRUE QUALITY VS OBSERVED SUCCESS
+    # ---------------------------------------------
+
+    for result in results:
+
+        clicks = result[
+            "click_counts"
+        ]
+
+        correlation = spearmanr(
+            true_item_quality,
+            clicks,
+        ).statistic
+
+        if not np.isnan(
+            correlation
+        ):
+
+            quality_correlations.append(
+                correlation
+            )
+
+        observed_top_10 = set(
+            np.argsort(
+                clicks
+            )[-10:]
+        )
+
+        recall = (
+            len(
+                observed_top_10
+                & true_top_10
+            )
+            / 10
+        )
+
+        true_top_10_recall.append(
+            recall
+        )
 
     return {
         "mean_rank_correlation":
@@ -355,13 +472,36 @@ def compare_worlds(
                 top_10_overlaps
             ),
 
-        "mean_gini":
+        "mean_popularity_gini":
             np.mean(
                 [
-                    result["gini"]
+                    result[
+                        "popularity_gini"
+                    ]
                     for result
                     in results
                 ]
+            ),
+
+        "mean_exposure_gini":
+            np.mean(
+                [
+                    result[
+                        "exposure_gini"
+                    ]
+                    for result
+                    in results
+                ]
+            ),
+
+        "mean_quality_correlation":
+            np.mean(
+                quality_correlations
+            ),
+
+        "mean_true_top_10_recall":
+            np.mean(
+                true_top_10_recall
             ),
 
         "mean_total_clicks":
@@ -384,6 +524,7 @@ def compare_worlds(
 def run_experiment(
     recommender_name,
     true_preferences,
+    true_item_quality,
 ):
 
     results = []
@@ -394,7 +535,9 @@ def run_experiment(
 
         result = simulate_world(
             recommender_name,
-            world_seed=1000 + world,
+            world_seed=(
+                1000 + world
+            ),
             true_preferences=(
                 true_preferences
             ),
@@ -405,7 +548,8 @@ def run_experiment(
         )
 
     return compare_worlds(
-        results
+        results,
+        true_item_quality,
     )
 
 
@@ -415,13 +559,20 @@ def run_experiment(
 
 def main():
 
-    true_preferences = (
-        create_true_preferences()
-    )
+    (
+        true_preferences,
+        true_item_quality,
+    ) = create_true_preferences()
 
-    print("==============================")
-    print("PARALLEL WORLDS EXPERIMENT")
-    print("==============================")
+    print(
+        "=============================="
+    )
+    print(
+        "PARALLEL WORLDS EXPERIMENT V2"
+    )
+    print(
+        "=============================="
+    )
 
     print(
         f"Users: {NUM_USERS}"
@@ -436,7 +587,7 @@ def main():
     )
 
     print(
-        f"Interactions per world: "
+        "Interactions per world: "
         f"{INTERACTIONS_PER_WORLD:,}"
     )
 
@@ -450,27 +601,46 @@ def main():
         metrics = run_experiment(
             recommender,
             true_preferences,
+            true_item_quality,
         )
 
         print(
-            f"--- {recommender.upper()} ---"
+            f"--- "
+            f"{recommender.upper()} "
+            f"---"
         )
 
         print(
-            "Mean rank correlation "
-            f"between worlds: "
+            "World-to-world rank "
+            "correlation: "
             f"{metrics['mean_rank_correlation']:.3f}"
         )
 
         print(
-            "Mean top-10 overlap "
-            f"between worlds: "
+            "World-to-world top-10 "
+            "overlap: "
             f"{metrics['mean_top_10_overlap']:.3f}"
         )
 
         print(
-            "Mean popularity Gini: "
-            f"{metrics['mean_gini']:.3f}"
+            "Popularity Gini: "
+            f"{metrics['mean_popularity_gini']:.3f}"
+        )
+
+        print(
+            "Exposure Gini: "
+            f"{metrics['mean_exposure_gini']:.3f}"
+        )
+
+        print(
+            "True quality vs popularity "
+            "correlation: "
+            f"{metrics['mean_quality_correlation']:.3f}"
+        )
+
+        print(
+            "True top-10 recovered: "
+            f"{metrics['mean_true_top_10_recall']:.3f}"
         )
 
         print(
@@ -480,7 +650,9 @@ def main():
 
         print()
 
-    print("==============================")
+    print(
+        "=============================="
+    )
 
 
 if __name__ == "__main__":
