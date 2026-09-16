@@ -4,3 +4,5 @@ __pycache__/
 
 data/raw/
 results/
+data/processed/*
+!data/processed/.gitkeep
