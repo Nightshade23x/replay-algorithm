@@ -17,7 +17,7 @@ from src.simulation.movielens_online_cf import (
 # CONFIGURATION
 # ---------------------------------------------------------
 
-NUM_WORLDS = 10
+NUM_WORLDS = 50
 
 INTERACTIONS_PER_WORLD = 30_000
 
