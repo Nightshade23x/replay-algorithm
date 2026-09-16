@@ -18,6 +18,16 @@ TOP_K = 20
 
 BASE_SEED = 2026
 
+# Controls how strongly popularity influences recommendation.
+#
+# 0.0 = popularity ignored
+# 1.0 = proportional to popularity
+# >1  = increasingly strong popularity feedback
+POPULARITY_ALPHA = 1.0
+
+# Prevents items with zero clicks from receiving zero probability.
+POPULARITY_PRIOR = 1.0
+
 
 PROJECT_ROOT = Path(
     __file__
@@ -32,10 +42,16 @@ PREFERENCE_PATH = (
 
 
 # ---------------------------------------------------------
-# LOAD MOVIELENS-DERIVED WORLD
+# LOAD MOVIELENS-DERIVED PREFERENCES
 # ---------------------------------------------------------
 
 def load_preferences():
+    """
+    Load the fixed MovieLens-derived preference matrix.
+
+    Every simulated world uses exactly the same users,
+    items and underlying preferences.
+    """
 
     data = np.load(
         PREFERENCE_PATH
@@ -61,7 +77,7 @@ def load_preferences():
 
 
 # ---------------------------------------------------------
-# RESPONSE MODEL
+# USER RESPONSE MODEL
 # ---------------------------------------------------------
 
 def preference_to_click_probability(
@@ -69,20 +85,14 @@ def preference_to_click_probability(
 ):
     """
     Convert MovieLens-derived preference scores into
-    simulated click probabilities.
+    simulated positive-interaction probabilities.
 
-    preference_scores are in [0, 1].
+    The preference scores are in [0, 1], but they are NOT
+    directly treated as click probabilities.
 
-    IMPORTANT:
-    These scores are not themselves click probabilities.
-
-    We map them through a logistic response model so that
-    highly preferred items are substantially more likely
-    to receive positive interaction.
+    A logistic transformation is used instead.
     """
 
-    # Corresponds roughly to a predicted MovieLens
-    # rating of 4 out of 5.
     midpoint = 0.75
 
     strength = 6.0
@@ -109,10 +119,16 @@ def preference_to_click_probability(
 
 
 # ---------------------------------------------------------
-# GINI
+# GINI COEFFICIENT
 # ---------------------------------------------------------
 
 def gini(values):
+    """
+    Measure inequality.
+
+    0 = perfectly equal distribution
+    values closer to 1 = highly unequal distribution
+    """
 
     values = np.asarray(
         values,
@@ -149,7 +165,7 @@ def gini(values):
 
 
 # ---------------------------------------------------------
-# RECOMMENDERS
+# RANDOM RECOMMENDER
 # ---------------------------------------------------------
 
 def random_recommender(
@@ -157,6 +173,9 @@ def random_recommender(
     user,
     seen,
 ):
+    """
+    Recommend uniformly from items the user has not yet seen.
+    """
 
     available = np.flatnonzero(
         ~seen[user]
@@ -175,12 +194,26 @@ def random_recommender(
     )
 
 
-def popularity_recommender(
+# ---------------------------------------------------------
+# PROPORTIONAL POPULARITY RECOMMENDER
+# ---------------------------------------------------------
+
+def proportional_popularity_recommender(
     rng,
     user,
     seen,
     click_counts,
 ):
+    """
+    Recommend probabilistically according to popularity.
+
+    Probability is proportional to:
+
+        (clicks + prior) ^ alpha
+
+    Unlike the greedy recommender, less-popular items can
+    still receive exposure.
+    """
 
     available = np.flatnonzero(
         ~seen[user]
@@ -194,14 +227,67 @@ def popularity_recommender(
             seen.shape[1]
         )
 
-    counts = click_counts[
-        available
-    ]
+    weights = (
+        click_counts[
+            available
+        ].astype(float)
+        + POPULARITY_PRIOR
+    ) ** POPULARITY_ALPHA
 
-    maximum = counts.max()
+    probabilities = (
+        weights
+        / weights.sum()
+    )
+
+    return rng.choice(
+        available,
+        p=probabilities,
+    )
+
+
+# ---------------------------------------------------------
+# GREEDY POPULARITY RECOMMENDER
+# ---------------------------------------------------------
+
+def greedy_popularity_recommender(
+    rng,
+    user,
+    seen,
+    click_counts,
+):
+    """
+    Recommend one of the currently most popular available
+    items.
+
+    This is intentionally aggressive and acts as a
+    stress-test baseline for strong feedback loops.
+    """
+
+    available = np.flatnonzero(
+        ~seen[user]
+    )
+
+    if len(
+        available
+    ) == 0:
+
+        available = np.arange(
+            seen.shape[1]
+        )
+
+    available_clicks = (
+        click_counts[
+            available
+        ]
+    )
+
+    maximum = (
+        available_clicks.max()
+    )
 
     candidates = available[
-        counts == maximum
+        available_clicks
+        == maximum
     ]
 
     return rng.choice(
@@ -218,6 +304,14 @@ def simulate_world(
     world_seed,
     click_probabilities,
 ):
+    """
+    Replay one simulated recommendation world.
+
+    Users, items and underlying preferences remain fixed.
+
+    The random seed changes between worlds, creating
+    different early stochastic interactions.
+    """
 
     rng = np.random.default_rng(
         world_seed
@@ -227,12 +321,12 @@ def simulate_world(
         click_probabilities.shape
     )
 
-    clicks = np.zeros(
+    click_counts = np.zeros(
         num_items,
         dtype=int,
     )
 
-    exposures = np.zeros(
+    exposure_counts = np.zeros(
         num_items,
         dtype=int,
     )
@@ -255,7 +349,10 @@ def simulate_world(
             num_users
         )
 
-        # Initial exploration period.
+        # -------------------------------------------------
+        # INITIAL EXPLORATION
+        # -------------------------------------------------
+
         if (
             step
             < INITIAL_RANDOM_INTERACTIONS
@@ -266,6 +363,10 @@ def simulate_world(
                 user,
                 seen,
             )
+
+        # -------------------------------------------------
+        # RANDOM BASELINE
+        # -------------------------------------------------
 
         elif (
             recommender_name
@@ -278,16 +379,36 @@ def simulate_world(
                 seen,
             )
 
+        # -------------------------------------------------
+        # PROPORTIONAL POPULARITY
+        # -------------------------------------------------
+
         elif (
             recommender_name
-            == "popularity"
+            == "proportional_popularity"
         ):
 
-            item = popularity_recommender(
+            item = proportional_popularity_recommender(
                 rng,
                 user,
                 seen,
-                clicks,
+                click_counts,
+            )
+
+        # -------------------------------------------------
+        # GREEDY POPULARITY
+        # -------------------------------------------------
+
+        elif (
+            recommender_name
+            == "greedy_popularity"
+        ):
+
+            item = greedy_popularity_recommender(
+                rng,
+                user,
+                seen,
+                click_counts,
             )
 
         else:
@@ -297,7 +418,11 @@ def simulate_world(
                 f"{recommender_name}"
             )
 
-        exposures[
+        # -------------------------------------------------
+        # RECORD EXPOSURE
+        # -------------------------------------------------
+
+        exposure_counts[
             item
         ] += 1
 
@@ -305,6 +430,10 @@ def simulate_world(
             user,
             item
         ] = True
+
+        # -------------------------------------------------
+        # SIMULATED USER RESPONSE
+        # -------------------------------------------------
 
         probability = (
             click_probabilities[
@@ -320,7 +449,7 @@ def simulate_world(
 
         if clicked:
 
-            clicks[
+            click_counts[
                 item
             ] += 1
 
@@ -328,49 +457,61 @@ def simulate_world(
 
     return {
         "clicks":
-            clicks,
+            click_counts,
 
         "exposures":
-            exposures,
+            exposure_counts,
 
         "total_clicks":
             total_clicks,
 
         "click_gini":
             gini(
-                clicks
+                click_counts
             ),
 
         "exposure_gini":
             gini(
-                exposures
+                exposure_counts
             ),
     }
 
 
 # ---------------------------------------------------------
-# COMPARE WORLDS
+# EVALUATE PARALLEL WORLDS
 # ---------------------------------------------------------
 
 def evaluate_worlds(
     results,
-    true_item_quality,
+    underlying_item_relevance,
 ):
+    """
+    Evaluate:
+
+    1. How similar outcomes are across parallel worlds.
+    2. How closely popularity reflects underlying relevance.
+    3. How unequal exposure and popularity become.
+    """
 
     rank_correlations = []
+
     top_k_overlaps = []
 
-    quality_correlations = []
-
-    true_top_k = set(
-        np.argsort(
-            true_item_quality
-        )[-TOP_K:]
-    )
+    relevance_correlations = []
 
     true_top_k_recall = []
 
-    # Pairwise world comparisons.
+    # Items with the highest model-defined relevance.
+    underlying_top_k = set(
+        np.argsort(
+            underlying_item_relevance
+        )[-TOP_K:]
+    )
+
+    # -----------------------------------------------------
+    # WORLD-TO-WORLD COMPARISON
+    # -----------------------------------------------------
+
     for i in range(
         len(results)
     ):
@@ -429,7 +570,10 @@ def evaluate_worlds(
                 overlap
             )
 
-    # Compare success with underlying quality.
+    # -----------------------------------------------------
+    # UNDERLYING RELEVANCE VS OBSERVED POPULARITY
+    # -----------------------------------------------------
+
     for result in results:
 
         clicks = result[
@@ -437,7 +581,7 @@ def evaluate_worlds(
         ]
 
         correlation = spearmanr(
-            true_item_quality,
+            underlying_item_relevance,
             clicks,
         ).statistic
 
@@ -445,7 +589,7 @@ def evaluate_worlds(
             correlation
         ):
 
-            quality_correlations.append(
+            relevance_correlations.append(
                 correlation
             )
 
@@ -458,7 +602,7 @@ def evaluate_worlds(
         recall = (
             len(
                 observed_top_k
-                & true_top_k
+                & underlying_top_k
             )
             / TOP_K
         )
@@ -466,6 +610,10 @@ def evaluate_worlds(
         true_top_k_recall.append(
             recall
         )
+
+    # -----------------------------------------------------
+    # SUMMARY
+    # -----------------------------------------------------
 
     return {
         "rank_correlation":
@@ -478,12 +626,12 @@ def evaluate_worlds(
                 top_k_overlaps
             ),
 
-        "quality_correlation":
+        "relevance_correlation":
             np.mean(
-                quality_correlations
+                relevance_correlations
             ),
 
-        "true_top_k_recall":
+        "top_k_relevance_recall":
             np.mean(
                 true_top_k_recall
             ),
@@ -524,13 +672,13 @@ def evaluate_worlds(
 
 
 # ---------------------------------------------------------
-# RUN ALGORITHM
+# RUN ONE RECOMMENDER ACROSS ALL WORLDS
 # ---------------------------------------------------------
 
 def run_algorithm(
     recommender_name,
     click_probabilities,
-    true_item_quality,
+    underlying_item_relevance,
 ):
 
     results = []
@@ -539,9 +687,14 @@ def run_algorithm(
         NUM_WORLDS
     ):
 
+        world_seed = (
+            BASE_SEED
+            + world
+        )
+
         result = simulate_world(
             recommender_name,
-            BASE_SEED + world,
+            world_seed,
             click_probabilities,
         )
 
@@ -551,7 +704,7 @@ def run_algorithm(
 
     return evaluate_worlds(
         results,
-        true_item_quality,
+        underlying_item_relevance,
     )
 
 
@@ -573,9 +726,12 @@ def main():
         )
     )
 
-    # "True item quality" in this simulated world:
-    # mean positive-interaction probability across users.
-    true_item_quality = (
+    # Mean simulated positive-interaction probability
+    # across all users.
+    #
+    # We call this "underlying item relevance" rather
+    # than objective or true item quality.
+    underlying_item_relevance = (
         click_probabilities.mean(
             axis=0
         )
@@ -618,6 +774,11 @@ def main():
         f"{INITIAL_RANDOM_INTERACTIONS:,}"
     )
 
+    print(
+        f"Popularity alpha: "
+        f"{POPULARITY_ALPHA}"
+    )
+
     print()
 
     print(
@@ -641,10 +802,13 @@ def main():
 
     print()
 
-    for recommender in [
+    recommenders = [
         "random",
-        "popularity",
-    ]:
+        "proportional_popularity",
+        "greedy_popularity",
+    ]
+
+    for recommender in recommenders:
 
         print(
             f"Running "
@@ -654,11 +818,13 @@ def main():
         metrics = run_algorithm(
             recommender,
             click_probabilities,
-            true_item_quality,
+            underlying_item_relevance,
         )
 
+        print()
+
         print(
-            f"\n--- "
+            f"--- "
             f"{recommender.upper()} "
             f"---"
         )
@@ -674,13 +840,13 @@ def main():
         )
 
         print(
-            "True quality vs popularity: "
-            f"{metrics['quality_correlation']:.3f}"
+            "Underlying relevance vs popularity: "
+            f"{metrics['relevance_correlation']:.3f}"
         )
 
         print(
-            f"True top-{TOP_K} recovered: "
-            f"{metrics['true_top_k_recall']:.3f}"
+            f"Underlying top-{TOP_K} recovered: "
+            f"{metrics['top_k_relevance_recall']:.3f}"
         )
 
         print(
